@@ -8,7 +8,7 @@ from Crypto.PublicKey import RSA
 from Crypto.Util import number
 from Crypto.Cipher import PKCS1_OAEP
 
-from common import e64s, d64s, d64b, d64sb, hexlify
+from common import e64bs, e64s, d64s, d64b, d64sb, hexlify
 
 ########################################
 
@@ -51,11 +51,11 @@ class Soapifier(object):
         assert x.tag == '{http://schemas.xmlsoap.org/soap/envelope/}Envelope'
         r = x.find('.//{http://ctkipservice.rsasecurity.com}' + outer)
         ad = r.find('{http://ctkipservice.rsasecurity.com}AuthData')
-        assert ad.text == self.auth == response.headers.get('Authorization')
+        #assert ad.text == self.auth == response.headers.get('Authorization')
         pd = r.find('{http://ctkipservice.rsasecurity.com}ProvisioningData')
         rr = r.find('{http://ctkipservice.rsasecurity.com}' + inner)
 
-        return ET.fromstring(d64s(pd)), ET.fromstring(d64s(rr))
+        return ET.fromstring(d64s(''.join(pd.itertext()))), ET.fromstring(d64s(''.join(rr.itertext())))
 
 ########################################
 
@@ -103,13 +103,13 @@ class CtKipClient(object):
         if self.verbose:
             print(res1)
 
-        session_id = res1.getroot().attrib['SessionID']
+        session_id = res1.attrib['SessionID']
         k = res1.find('.//{http://www.w3.org/2000/09/xmldsig#}RSAKeyValue')
         mod = number.bytes_to_long(d64sb(k.find(
         '{http://www.w3.org/2000/09/xmldsig#}Modulus').text))
         exp = number.bytes_to_long(d64sb(k.find(
         '{http://www.w3.org/2000/09/xmldsig#}Exponent').text))
-        pubk = RSA.construct({'n': mod, 'e': exp})
+        pubk = RSA.construct((mod,exp))
         pl = res1.find('.//Payload')
         server_nonce = d64sb(pl.find('Nonce').text)
 
@@ -122,6 +122,7 @@ class CtKipClient(object):
         if client_none is None:
             client_nonce = random.getrandbits(16*8)
         cipher = PKCS1_OAEP.new(self.server_pubkey)
+        client_nonce = client_nonce.to_bytes(16, byteorder='big')
         encrypted_client_nonce = cipher.encrypt(client_nonce)
 
         print("Generated client nonce:\n\tplaintext: {}\n\tencrypted: {}".format(
@@ -129,10 +130,16 @@ class CtKipClient(object):
 
         # send second request
         req2_filled = req2_tmpl.format(
-        session_id=session_id, encrypted_client_nonce=encrypted_client_nonce,
-        server_nonce=server_nonce)
+        session_id=session_id, encrypted_client_nonce=e64bs(encrypted_client_nonce), server_nonce=e64bs(server_nonce))
+
+        if self.verbose:
+            print(req2_filled)
+
         req2 = self.soap.make_ClientRequest('ServerFinished', pd, req2_filled)
-        pd_res2, res2 = self.soap.parse_ServerResponse(self.s.send(self.s.prepare_request(req2)))
+        raw_res2 = self.s.send(self.s.prepare_request(req2))
+        if self.verbose:
+            print(raw_res2)
+        pd_res2, res2 = self.soap.parse_ServerResponse(raw_res2)
 
         if self.verbose:
             print(res2)
@@ -141,7 +148,7 @@ class CtKipClient(object):
         key_id = d64b(res2.find('TokenID').text)
         token_id = d64b(res2.find('KeyID').text)
         key_exp = res2.find('KeyExpiryDate').text
-        mac = d64b(res2.find('Mac'))
+        mac = d64b(res2.find('Mac').text)
 
         return (key_id, token_id, key_exp, mac)
 
